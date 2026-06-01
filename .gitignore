@@ -4,9 +4,9 @@ dist/
 outputs/
 .env
 .env.*
+!.env.example
 /data/
 /api/
-/supabase/
 /meta-man-trading-perspective/
 /_Legal Frame PPT/
 /早会/
