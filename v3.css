@@ -7,10 +7,10 @@
   --v3-ink-subtle: #8a8f98;
   --v3-ink-tertiary: #62666d;
   --v3-canvas: #010102;
-  --v3-surface-1: rgba(15, 16, 17, 0.86);
-  --v3-surface-2: rgba(20, 21, 22, 0.9);
-  --v3-surface-3: rgba(24, 25, 26, 0.82);
-  --v3-surface-inset: rgba(1, 1, 2, 0.68);
+  --v3-surface-1: rgba(15, 16, 17, 0.82);
+  --v3-surface-2: rgba(20, 21, 22, 0.86);
+  --v3-surface-3: rgba(24, 25, 26, 0.76);
+  --v3-surface-inset: rgba(1, 1, 2, 0.6);
   --v3-hairline: rgba(255, 255, 255, 0.09);
   --v3-hairline-strong: rgba(255, 255, 255, 0.16);
   --v3-success: #27a644;
@@ -54,14 +54,14 @@ body::after {
 body::before {
   z-index: -2;
   background: url("/images/gopark-background.jpg") center top / cover no-repeat;
-  opacity: 0.13;
+  opacity: 0.32;
 }
 
 body::after {
   z-index: -1;
   background:
-    linear-gradient(180deg, rgba(1, 1, 2, 0.2) 0%, rgba(1, 1, 2, 0.62) 38%, #010102 100%),
-    linear-gradient(90deg, rgba(1, 1, 2, 0.88) 0%, rgba(1, 1, 2, 0.42) 48%, rgba(1, 1, 2, 0.86) 100%);
+    linear-gradient(180deg, rgba(1, 1, 2, 0.02) 0%, rgba(1, 1, 2, 0.28) 32%, rgba(1, 1, 2, 0.74) 76%, #010102 100%),
+    linear-gradient(90deg, rgba(1, 1, 2, 0.54) 0%, rgba(1, 1, 2, 0.12) 48%, rgba(1, 1, 2, 0.52) 100%);
 }
 
 a {
@@ -113,7 +113,7 @@ dd {
   gap: var(--v3-space-md);
   border-bottom: 1px solid var(--v3-hairline);
   padding: 0 var(--v3-space-xl);
-  background: rgba(1, 1, 2, 0.76);
+  background: rgba(1, 1, 2, 0.68);
   backdrop-filter: blur(16px);
 }
 
@@ -149,7 +149,7 @@ dd {
   border: 1px solid var(--v3-hairline);
   border-radius: 999px;
   padding: 6px 10px;
-  background: rgba(15, 16, 17, 0.74);
+  background: rgba(15, 16, 17, 0.68);
   text-decoration: none;
   backdrop-filter: blur(12px);
 }
