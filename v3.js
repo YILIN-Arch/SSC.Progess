@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = document.querySelector("#v3-app");
 
+const VERSION = "V3.3";
 const ADMIN_EMAIL = "lyl549439629@gmail.com";
 const REPORT_STATE_ID = "current";
 const ASSET_BUCKET = "report-assets";
@@ -34,10 +35,14 @@ const state = {
   saving: false,
   uploading: "",
   activeDetailKey: "",
+  expandedTableRows: {},
+  lightbox: null,
 };
 
 const progressKeys = ["hacking_progress", "plaster_progress", "clp_draw_pit"];
 const contentKeys = ["fountain_programme", "additional_works", "defect"];
+
+let lightboxDrag = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -63,6 +68,14 @@ function isEmptyObject(value) {
   return isObject(value) && Object.keys(value).length === 0;
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function makeId(prefix) {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
+
 function mergeTheme(theme) {
   return {
     ...clone(defaultTheme),
@@ -75,6 +88,133 @@ function mergeTheme(theme) {
       ...(isObject(theme?.cards) ? theme.cards : {}),
     },
   };
+}
+
+function normalizeColumnId(value, index) {
+  return String(value || `column_${index + 1}`)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || `column_${index + 1}`;
+}
+
+function parseProgrammeDate(status) {
+  const text = String(status || "");
+  const range = text.match(/(\d{1,2})\s*[-–]\s*(\d{1,2})\/(\d{1,2})/);
+  if (range) {
+    return {
+      start: `${range[1].padStart(2, "0")}/${range[3].padStart(2, "0")}`,
+      end: `${range[2].padStart(2, "0")}/${range[3].padStart(2, "0")}`,
+    };
+  }
+
+  const single = text.match(/(\d{1,2})\/(\d{1,2})/);
+  if (single) {
+    const value = `${single[1].padStart(2, "0")}/${single[2].padStart(2, "0")}`;
+    return { start: value, end: value };
+  }
+
+  return { start: "", end: "" };
+}
+
+function checklistToGantt(checklist = []) {
+  return checklist.map((item, index) => {
+    const dates = parseProgrammeDate(item.status);
+    const completed = Boolean(item.checked) || String(item.status || "").toLowerCase() === "completed";
+    return {
+      id: item.id || makeId(`task_${index + 1}`),
+      task: item.label || "",
+      status: item.status || "",
+      start: dates.start,
+      end: dates.end,
+      completed,
+    };
+  });
+}
+
+function normalizeGantt(section) {
+  if (Array.isArray(section.gantt)) {
+    section.gantt = section.gantt.map((item, index) => ({
+      id: item.id || makeId(`task_${index + 1}`),
+      task: item.task ?? item.label ?? "",
+      status: item.status ?? "",
+      start: item.start ?? parseProgrammeDate(item.status).start,
+      end: item.end ?? parseProgrammeDate(item.status).end,
+      completed: Boolean(item.completed ?? item.checked),
+    }));
+    delete section.checklist;
+    return;
+  }
+
+  if (Array.isArray(section.checklist)) {
+    section.gantt = checklistToGantt(section.checklist);
+    delete section.checklist;
+  }
+}
+
+function normalizeTable(section) {
+  const original = section.table;
+  if (!original) return;
+
+  if (Array.isArray(original)) {
+    section.table = {
+      columns: [
+        { id: "works", label: "Works" },
+        { id: "status", label: "Status" },
+      ],
+      rows: original.map((row, index) => ({
+        id: row.id || makeId(`row_${index + 1}`),
+        cells: {
+          works: row.works || "",
+          status: row.status || "",
+        },
+        media: Array.isArray(row.media) ? row.media : [],
+      })),
+    };
+    return;
+  }
+
+  const columns = Array.isArray(original.columns) && original.columns.length
+    ? original.columns.map((column, index) => ({
+        id: normalizeColumnId(column.id || column.label, index),
+        label: column.label || column.id || `Column ${index + 1}`,
+      }))
+    : [
+        { id: "works", label: "Works" },
+        { id: "status", label: "Status" },
+      ];
+
+  const rows = Array.isArray(original.rows)
+    ? original.rows.map((row, index) => {
+        const cells = {};
+        columns.forEach((column) => {
+          cells[column.id] =
+            row.cells?.[column.id] ??
+            row[column.id] ??
+            (column.id === "works" ? row.works : column.id === "status" ? row.status : "") ??
+            "";
+        });
+
+        return {
+          id: row.id || makeId(`row_${index + 1}`),
+          cells,
+          media: Array.isArray(row.media) ? row.media : [],
+        };
+      })
+    : [];
+
+  section.table = { columns, rows };
+}
+
+function normalizeReport(report) {
+  const next = clone(report);
+  next.sections = (next.sections || []).map((section) => {
+    const normalized = { ...section };
+    if (normalized.section_key === "fountain_programme") normalizeGantt(normalized);
+    if (normalized.table) normalizeTable(normalized);
+    return normalized;
+  });
+  return next;
 }
 
 function sectionByKey(key, report = state.report) {
@@ -121,7 +261,7 @@ async function init() {
   try {
     const response = await fetch("/data/report.json", { cache: "no-store" });
     if (!response.ok) throw new Error(`Unable to load report (${response.status}).`);
-    state.baseReport = await response.json();
+    state.baseReport = normalizeReport(await response.json());
     state.report = clone(state.baseReport);
 
     if (supabase) {
@@ -174,7 +314,7 @@ async function loadPublishedState() {
   }
 
   if (data?.report && !isEmptyObject(data.report)) {
-    state.report = data.report;
+    state.report = normalizeReport(data.report);
   }
 
   state.theme = mergeTheme(data?.theme);
@@ -207,7 +347,6 @@ function renderMetaPills(report) {
     <div class="v3-meta">
       <span>${escapeHtml(header.reporter)}</span>
       <span>${escapeHtml(header.date)}</span>
-      <span>${escapeHtml(report.sourceFile)}</span>
     </div>
   `;
 }
@@ -236,13 +375,8 @@ function renderRail(report) {
   return `
     <aside class="v3-rail" aria-label="Report index">
       <div class="v3-rail-block">
-        <p class="v3-eyebrow">Report date</p>
+        <p class="v3-eyebrow">Last Updated</p>
         <strong>${escapeHtml(header.date)}</strong>
-        <span>${escapeHtml(header.reporter)}</span>
-      </div>
-      <div class="v3-rail-block">
-        <p class="v3-eyebrow">Source</p>
-        <span>${escapeHtml(report.sourceFile)}</span>
       </div>
       <nav class="v3-rail-list" aria-label="Progress sections">
         ${railSections.map(renderRailItem).join("")}
@@ -273,10 +407,10 @@ function renderMediaPreview(section) {
   const media = section.media || [];
   if (!media.length) return "";
   return `
-    <div class="v3-card-media" aria-hidden="true">
-      <img src="${escapeAttr(media[0].url)}" alt="" loading="lazy" />
+    <button class="v3-card-media" type="button" data-action="open-section-lightbox" data-section-key="${escapeAttr(section.section_key)}" data-media-index="0" aria-label="Open ${escapeAttr(section.title)} image">
+      <img src="${escapeAttr(media[0].url)}" alt="${escapeAttr(media[0].caption || section.title)}" loading="lazy" />
       ${media.length > 1 ? `<span>${media.length} images</span>` : ""}
-    </div>
+    </button>
   `;
 }
 
@@ -289,7 +423,6 @@ function renderProgressCard(section) {
       ${renderMediaPreview(section)}
       <div class="v3-card-head">
         <div>
-          <p class="v3-eyebrow">Slide ${escapeHtml(section.source_slide)}</p>
           <h3>${escapeHtml(section.title)}</h3>
           ${section.subtitle ? `<p>${escapeHtml(section.subtitle)}</p>` : ""}
         </div>
@@ -305,17 +438,56 @@ function renderProgressCard(section) {
   `;
 }
 
-function renderChecklist(section) {
+function dateOrdinal(value) {
+  const match = String(value || "").match(/(\d{1,2})\/(\d{1,2})/);
+  if (!match) return null;
+  return Number(match[2]) * 31 + Number(match[1]);
+}
+
+function ganttBounds(tasks) {
+  const values = tasks.flatMap((item) => [dateOrdinal(item.start), dateOrdinal(item.end)]).filter(Number.isFinite);
+  if (!values.length) return { min: 0, max: 1 };
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  return { min, max: min === max ? min + 1 : max };
+}
+
+function ganttStyle(item, bounds) {
+  const start = dateOrdinal(item.start);
+  const end = dateOrdinal(item.end || item.start);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return "left: 0%; width: 100%;";
+  }
+
+  const span = bounds.max - bounds.min;
+  const left = ((start - bounds.min) / span) * 100;
+  const width = Math.max(((end - start) / span) * 100, 14);
+  return `left: ${clamp(left, 0, 100)}%; width: ${clamp(width, 14, 100 - left)}%;`;
+}
+
+function ganttStatus(item) {
+  if (item.status) return item.status;
+  if (item.start && item.end && item.start !== item.end) return `${item.start} - ${item.end}`;
+  if (item.start) return item.start;
+  return "TBC";
+}
+
+function renderGantt(section) {
+  const tasks = section.gantt || [];
+  const bounds = ganttBounds(tasks);
+
   return `
-    <div class="v3-timeline">
-      ${(section.checklist || [])
+    <div class="v3-gantt">
+      ${tasks
         .map(
           (item) => `
-            <div class="v3-timeline-row ${item.checked ? "is-complete" : ""}">
-              <span class="v3-check-dot" aria-hidden="true"></span>
-              <div>
-                <strong>${escapeHtml(item.label)}</strong>
-                ${item.status ? `<span>${escapeHtml(item.status)}</span>` : ""}
+            <div class="v3-gantt-row ${item.completed ? "is-complete" : ""}">
+              <div class="v3-gantt-label">
+                <strong>${escapeHtml(item.task)}</strong>
+                <span>${escapeHtml(ganttStatus(item))}</span>
+              </div>
+              <div class="v3-gantt-track" aria-label="${escapeAttr(item.task)} ${escapeAttr(ganttStatus(item))}">
+                <span style="${ganttStyle(item, bounds)}">${escapeHtml(item.completed ? "Completed" : ganttStatus(item))}</span>
               </div>
             </div>
           `,
@@ -325,36 +497,96 @@ function renderChecklist(section) {
   `;
 }
 
-function renderTable(section) {
+function tableColumns(section) {
+  return section.table?.columns || [];
+}
+
+function tableRows(section) {
+  return section.table?.rows || [];
+}
+
+function tableGridStyle(section) {
+  const columns = tableColumns(section);
+  const minWidth = Math.max(columns.length * 180, 360);
+  return {
+    table: ` style="min-width: ${minWidth}px"`,
+    row: ` style="grid-template-columns: repeat(${Math.max(columns.length, 1)}, minmax(180px, 1fr))"`,
+  };
+}
+
+function tableCellValue(row, column) {
+  return row.cells?.[column.id] || "";
+}
+
+function renderRowMedia(section, row, rowIndex) {
+  const media = row.media || [];
   return `
-    <div class="v3-table" role="table">
-      <div class="v3-table-row v3-table-head" role="row">
-        <span role="columnheader">Works</span>
-        <span role="columnheader">Status</span>
+    <div class="v3-table-row-media">
+      ${
+        media.length
+          ? media
+              .map(
+                (item, mediaIndex) => `
+                  <button class="v3-row-media-frame" type="button" data-action="open-row-lightbox" data-section-key="${escapeAttr(section.section_key)}" data-row-id="${escapeAttr(row.id)}" data-media-index="${mediaIndex}" aria-label="Open row ${rowIndex + 1} image">
+                    <img src="${escapeAttr(item.url)}" alt="${escapeAttr(item.caption || `Row ${rowIndex + 1}`)}" loading="lazy" />
+                    ${item.caption ? `<span>${escapeHtml(item.caption)}</span>` : ""}
+                  </button>
+                `,
+              )
+              .join("")
+          : '<div class="v3-row-media-placeholder">No row image added</div>'
+      }
+    </div>
+  `;
+}
+
+function renderTable(section) {
+  const columns = tableColumns(section);
+  const rows = tableRows(section);
+  const style = tableGridStyle(section);
+  const expandedRowId = state.expandedTableRows[section.section_key];
+
+  return `
+    <div class="v3-table-scroll">
+      <div class="v3-table"${style.table} role="table">
+        <div class="v3-table-row v3-table-head" role="row"${style.row}>
+          ${columns.map((column) => `<span role="columnheader">${escapeHtml(column.label)}</span>`).join("")}
+        </div>
+        ${
+          rows.length
+            ? rows
+                .map(
+                  (row, rowIndex) => `
+                    <div class="v3-table-row" role="row"${style.row}>
+                      ${columns
+                        .map(
+                          (column) => `
+                            <button class="v3-table-cell" type="button" role="cell" data-action="toggle-table-row" data-section-key="${escapeAttr(section.section_key)}" data-row-id="${escapeAttr(row.id)}">
+                              ${tableCellValue(row, column) ? escapeHtml(tableCellValue(row, column)) : '<span class="v3-muted">blank / no status</span>'}
+                            </button>
+                          `,
+                        )
+                        .join("")}
+                    </div>
+                    ${expandedRowId === row.id ? renderRowMedia(section, row, rowIndex) : ""}
+                  `,
+                )
+                .join("")
+            : `<div class="v3-table-empty">No rows</div>`
+        }
       </div>
-      ${(section.table || [])
-        .map(
-          (row) => `
-            <div class="v3-table-row" role="row">
-              <span role="cell">${escapeHtml(row.works)}</span>
-              <span role="cell">${row.status ? escapeHtml(row.status) : '<span class="v3-muted">blank / no status</span>'}</span>
-            </div>
-          `,
-        )
-        .join("")}
     </div>
   `;
 }
 
 function renderContentSection(section) {
-  const content = section.checklist ? renderChecklist(section) : renderTable(section);
+  const content = section.gantt ? renderGantt(section) : renderTable(section);
 
   return `
     <article class="v3-panel" id="${escapeAttr(section.section_key)}" data-detail-key="${escapeAttr(section.section_key)}" role="button" tabindex="0"${cardStyle(section)}>
       ${renderMediaPreview(section)}
       <div class="v3-panel-head">
         <div>
-          <p class="v3-eyebrow">Slide ${escapeHtml(section.source_slide)}</p>
           <h2>${escapeHtml(section.title)}</h2>
           ${section.subtitle ? `<p>${escapeHtml(section.subtitle)}</p>` : ""}
         </div>
@@ -374,7 +606,7 @@ function renderTopbar() {
       </a>
       <nav class="v3-actions" aria-label="Report actions">
         ${adminControls}
-        <span>V3.2</span>
+        <span>${VERSION}</span>
       </nav>
     </header>
   `;
@@ -445,6 +677,7 @@ function renderReport() {
       </section>
     </main>
     ${state.activeDetailKey ? renderDetailModal(sectionByKey(state.activeDetailKey)) : ""}
+    ${state.lightbox ? renderLightbox() : ""}
     ${state.editorOpen && state.draft ? renderEditor() : ""}
   `;
 }
@@ -456,13 +689,12 @@ function renderDetailModal(section) {
       <section class="v3-detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
         <button class="v3-icon-button" type="button" data-action="close-detail" aria-label="Close detail">×</button>
         <div>
-          <p class="v3-eyebrow">Slide ${escapeHtml(section.source_slide)}</p>
           <h2 id="detail-title">${escapeHtml(section.title)}</h2>
           ${section.subtitle ? `<p>${escapeHtml(section.subtitle)}</p>` : ""}
         </div>
         ${renderDetailMedia(section)}
         ${section.metrics ? renderFactList(section) : ""}
-        ${section.checklist ? renderChecklist(section) : ""}
+        ${section.gantt ? renderGantt(section) : ""}
         ${section.table ? renderTable(section) : ""}
       </section>
     </div>
@@ -476,14 +708,38 @@ function renderDetailMedia(section) {
     <div class="v3-detail-media">
       ${media
         .map(
-          (item) => `
+          (item, mediaIndex) => `
             <figure>
-              <img src="${escapeAttr(item.url)}" alt="${escapeAttr(item.caption || section.title)}" />
+              <button class="v3-detail-image-button" type="button" data-action="open-section-lightbox" data-section-key="${escapeAttr(section.section_key)}" data-media-index="${mediaIndex}" aria-label="Open ${escapeAttr(item.caption || section.title)}">
+                <img src="${escapeAttr(item.url)}" alt="${escapeAttr(item.caption || section.title)}" />
+              </button>
               ${item.caption ? `<figcaption>${escapeHtml(item.caption)}</figcaption>` : ""}
             </figure>
           `,
         )
         .join("")}
+    </div>
+  `;
+}
+
+function renderLightbox() {
+  const lightbox = state.lightbox;
+  const item = lightbox.items[lightbox.index];
+  const count = lightbox.items.length;
+  return `
+    <div class="v3-lightbox" data-action="close-lightbox" role="dialog" aria-modal="true" aria-label="Image viewer">
+      <div class="v3-lightbox-toolbar">
+        <span>${escapeHtml(item.caption || `Image ${lightbox.index + 1}`)}</span>
+        <div>
+          ${count > 1 ? `<button type="button" data-action="prev-lightbox">Prev</button><button type="button" data-action="next-lightbox">Next</button>` : ""}
+          <button type="button" data-action="reset-lightbox">Reset</button>
+          <button type="button" data-action="close-lightbox">Close</button>
+        </div>
+      </div>
+      <div class="v3-lightbox-stage">
+        <img class="v3-lightbox-image" src="${escapeAttr(item.url)}" alt="${escapeAttr(item.caption || "Report image")}" draggable="false" style="transform: translate(${lightbox.x}px, ${lightbox.y}px) scale(${lightbox.scale});" />
+      </div>
+      <p class="v3-lightbox-hint">Command/Ctrl + mouse wheel to zoom. Drag to pan. Double click to reset.</p>
     </div>
   `;
 }
@@ -499,7 +755,7 @@ function renderEditor() {
         <div class="v3-editor-head">
           <div>
             <p class="v3-eyebrow">Admin editor</p>
-            <h2 id="editor-title">Publish V3.2 edits</h2>
+            <h2 id="editor-title">Publish ${VERSION} edits</h2>
           </div>
           <button class="v3-icon-button" type="button" data-action="close-editor" aria-label="Close editor">×</button>
         </div>
@@ -584,7 +840,7 @@ function renderSectionEditor(section, sectionIndex, theme) {
       ${renderField("Title", section.title, `data-section-index="${sectionIndex}" data-section-field="title"`)}
       ${renderField("Subtitle", section.subtitle || "", `data-section-index="${sectionIndex}" data-section-field="subtitle"`)}
       ${section.metrics ? renderMetricEditor(section.metrics, sectionIndex) : ""}
-      ${section.checklist ? renderChecklistEditor(section.checklist, sectionIndex) : ""}
+      ${section.gantt ? renderGanttEditor(section.gantt, sectionIndex) : ""}
       ${section.table ? renderTableEditor(section.table, sectionIndex) : ""}
       ${renderMediaEditor(section, sectionIndex)}
     </section>
@@ -609,17 +865,19 @@ function renderMetricEditor(metrics, sectionIndex) {
   `;
 }
 
-function renderChecklistEditor(checklist, sectionIndex) {
+function renderGanttEditor(tasks, sectionIndex) {
   return `
     <div class="v3-editor-group">
-      <h4>Checklist</h4>
-      ${checklist
+      <h4>Compact Gantt</h4>
+      ${tasks
         .map(
-          (item, itemIndex) => `
-            <div class="v3-editor-row is-check-row">
-              <input type="checkbox" ${item.checked ? "checked" : ""} data-section-index="${sectionIndex}" data-check-index="${itemIndex}" data-check-field="checked" aria-label="Completed" />
-              <input type="text" value="${escapeAttr(item.label)}" data-section-index="${sectionIndex}" data-check-index="${itemIndex}" data-check-field="label" aria-label="Checklist label" />
-              <input type="text" value="${escapeAttr(item.status)}" data-section-index="${sectionIndex}" data-check-index="${itemIndex}" data-check-field="status" aria-label="Checklist status" />
+          (item, taskIndex) => `
+            <div class="v3-editor-row is-gantt-row">
+              <input type="checkbox" ${item.completed ? "checked" : ""} data-section-index="${sectionIndex}" data-gantt-index="${taskIndex}" data-gantt-field="completed" aria-label="Completed" />
+              <input type="text" value="${escapeAttr(item.task)}" data-section-index="${sectionIndex}" data-gantt-index="${taskIndex}" data-gantt-field="task" aria-label="Task" />
+              <input type="text" value="${escapeAttr(item.status)}" data-section-index="${sectionIndex}" data-gantt-index="${taskIndex}" data-gantt-field="status" aria-label="Status" />
+              <input type="text" value="${escapeAttr(item.start)}" data-section-index="${sectionIndex}" data-gantt-index="${taskIndex}" data-gantt-field="start" aria-label="Start" placeholder="DD/MM" />
+              <input type="text" value="${escapeAttr(item.end)}" data-section-index="${sectionIndex}" data-gantt-index="${taskIndex}" data-gantt-field="end" aria-label="End" placeholder="DD/MM" />
             </div>
           `,
         )
@@ -628,20 +886,90 @@ function renderChecklistEditor(checklist, sectionIndex) {
   `;
 }
 
-function renderTableEditor(rows, sectionIndex) {
+function renderTableEditor(table, sectionIndex) {
+  const columns = table.columns || [];
+  const rows = table.rows || [];
   return `
     <div class="v3-editor-group">
-      <h4>Table</h4>
-      ${rows
-        .map(
-          (row, rowIndex) => `
-            <div class="v3-editor-row">
-              <input type="text" value="${escapeAttr(row.works)}" data-section-index="${sectionIndex}" data-table-index="${rowIndex}" data-table-field="works" aria-label="Works" />
-              <input type="text" value="${escapeAttr(row.status)}" data-section-index="${sectionIndex}" data-table-index="${rowIndex}" data-table-field="status" aria-label="Status" />
-            </div>
-          `,
-        )
-        .join("")}
+      <div class="v3-editor-group-head">
+        <h4>Table</h4>
+        <div>
+          <button type="button" data-action="add-table-column" data-section-index="${sectionIndex}">Add column</button>
+          <button type="button" data-action="add-table-row" data-section-index="${sectionIndex}">Add row</button>
+        </div>
+      </div>
+      <div class="v3-editor-table-columns">
+        ${columns
+          .map(
+            (column, columnIndex) => `
+              <div>
+                <input type="text" value="${escapeAttr(column.label)}" data-section-index="${sectionIndex}" data-column-index="${columnIndex}" data-table-column-field="label" aria-label="Column title" />
+                <button type="button" data-action="remove-table-column" data-section-index="${sectionIndex}" data-column-index="${columnIndex}" ${columns.length <= 1 ? "disabled" : ""}>Delete</button>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+      <div class="v3-editor-table-rows">
+        ${
+          rows.length
+            ? rows
+                .map(
+                  (row, rowIndex) => `
+                    <div class="v3-editor-table-row">
+                      <div class="v3-editor-row-head">
+                        <strong>Row ${rowIndex + 1}</strong>
+                        <button type="button" data-action="remove-table-row" data-section-index="${sectionIndex}" data-row-index="${rowIndex}">Delete row</button>
+                      </div>
+                      <div class="v3-editor-table-cells">
+                        ${columns
+                          .map(
+                            (column) => `
+                              <label class="v3-field">
+                                <span>${escapeHtml(column.label)}</span>
+                                <input type="text" value="${escapeAttr(row.cells?.[column.id] || "")}" data-section-index="${sectionIndex}" data-row-index="${rowIndex}" data-column-id="${escapeAttr(column.id)}" data-table-cell-field="value" />
+                              </label>
+                            `,
+                          )
+                          .join("")}
+                      </div>
+                      ${renderRowMediaEditor(row, sectionIndex, rowIndex)}
+                    </div>
+                  `,
+                )
+                .join("")
+            : '<p class="v3-empty-media">No rows</p>'
+        }
+      </div>
+    </div>
+  `;
+}
+
+function renderRowMediaEditor(row, sectionIndex, rowIndex) {
+  const media = row.media || [];
+  return `
+    <div class="v3-editor-group is-nested">
+      <label class="v3-file-field">
+        <span>Upload row image</span>
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-row-image="${rowIndex}" data-section-index="${sectionIndex}" />
+      </label>
+      <div class="v3-editor-media-list">
+        ${
+          media.length
+            ? media
+                .map(
+                  (item, mediaIndex) => `
+                    <div>
+                      <img src="${escapeAttr(item.url)}" alt="" />
+                      <input type="text" value="${escapeAttr(item.caption || "")}" data-section-index="${sectionIndex}" data-row-index="${rowIndex}" data-row-media-index="${mediaIndex}" data-row-media-field="caption" aria-label="Row image caption" />
+                      <button type="button" data-action="remove-row-media" data-section-index="${sectionIndex}" data-row-index="${rowIndex}" data-row-media-index="${mediaIndex}">Remove</button>
+                    </div>
+                  `,
+                )
+                .join("")
+            : '<p class="v3-empty-media">No row images added</p>'
+        }
+      </div>
     </div>
   `;
 }
@@ -650,7 +978,7 @@ function renderMediaEditor(section, sectionIndex) {
   const media = section.media || [];
   return `
     <div class="v3-editor-group">
-      <h4>Images</h4>
+      <h4>Section images</h4>
       <label class="v3-file-field">
         <span>Upload section image</span>
         <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-section="${sectionIndex}" />
@@ -706,7 +1034,7 @@ async function logout() {
 
 function openEditor() {
   state.draft = {
-    report: clone(state.report),
+    report: normalizeReport(state.report),
     theme: clone(state.theme),
   };
   state.editorOpen = true;
@@ -727,10 +1055,11 @@ async function saveEditor() {
   state.authMessage = "";
   render();
 
+  const report = normalizeReport(state.draft.report);
   const { data: userData } = await supabase.auth.getUser();
   const { error } = await supabase.from("report_page_state").upsert({
     id: REPORT_STATE_ID,
-    report: state.draft.report,
+    report,
     theme: state.draft.theme,
     updated_by: userData.user?.id,
     updated_at: new Date().toISOString(),
@@ -743,7 +1072,7 @@ async function saveEditor() {
     return;
   }
 
-  state.report = clone(state.draft.report);
+  state.report = clone(report);
   state.theme = mergeTheme(state.draft.theme);
   state.editorOpen = false;
   state.draft = null;
@@ -768,21 +1097,68 @@ function updateDraftFromInput(target) {
   } else if (target.dataset.metricField) {
     const metricIndex = Number(target.dataset.metricIndex);
     state.draft.report.sections[sectionIndex].metrics[metricIndex][target.dataset.metricField] = target.value;
-  } else if (target.dataset.tableField) {
-    const tableIndex = Number(target.dataset.tableIndex);
-    state.draft.report.sections[sectionIndex].table[tableIndex][target.dataset.tableField] = target.value;
-  } else if (target.dataset.checkField) {
-    const checkIndex = Number(target.dataset.checkIndex);
-    const value = target.dataset.checkField === "checked" ? target.checked : target.value;
-    state.draft.report.sections[sectionIndex].checklist[checkIndex][target.dataset.checkField] = value;
+  } else if (target.dataset.ganttField) {
+    const taskIndex = Number(target.dataset.ganttIndex);
+    const value = target.dataset.ganttField === "completed" ? target.checked : target.value;
+    state.draft.report.sections[sectionIndex].gantt[taskIndex][target.dataset.ganttField] = value;
+  } else if (target.dataset.tableColumnField) {
+    const columnIndex = Number(target.dataset.columnIndex);
+    state.draft.report.sections[sectionIndex].table.columns[columnIndex].label = target.value;
+  } else if (target.dataset.tableCellField) {
+    const rowIndex = Number(target.dataset.rowIndex);
+    const columnId = target.dataset.columnId;
+    state.draft.report.sections[sectionIndex].table.rows[rowIndex].cells[columnId] = target.value;
   } else if (target.dataset.mediaField) {
     const mediaIndex = Number(target.dataset.mediaIndex);
     state.draft.report.sections[sectionIndex].media[mediaIndex][target.dataset.mediaField] = target.value;
+  } else if (target.dataset.rowMediaField) {
+    const rowIndex = Number(target.dataset.rowIndex);
+    const mediaIndex = Number(target.dataset.rowMediaIndex);
+    state.draft.report.sections[sectionIndex].table.rows[rowIndex].media[mediaIndex][target.dataset.rowMediaField] = target.value;
   } else if (target.dataset.cardColor) {
     const key = target.dataset.cardColor;
     state.draft.theme.cards ||= {};
     state.draft.theme.cards[key] = { ...(state.draft.theme.cards[key] || {}), background: target.value };
   }
+}
+
+function draftTable(sectionIndex) {
+  return state.draft.report.sections[sectionIndex].table;
+}
+
+function addTableColumn(sectionIndex) {
+  const table = draftTable(sectionIndex);
+  const id = makeId("column");
+  table.columns.push({ id, label: "New column" });
+  table.rows.forEach((row) => {
+    row.cells[id] = "";
+  });
+  render();
+}
+
+function removeTableColumn(sectionIndex, columnIndex) {
+  const table = draftTable(sectionIndex);
+  if (table.columns.length <= 1) return;
+  const [removed] = table.columns.splice(columnIndex, 1);
+  table.rows.forEach((row) => {
+    delete row.cells[removed.id];
+  });
+  render();
+}
+
+function addTableRow(sectionIndex) {
+  const table = draftTable(sectionIndex);
+  const cells = {};
+  table.columns.forEach((column) => {
+    cells[column.id] = "";
+  });
+  table.rows.push({ id: makeId("row"), cells, media: [] });
+  render();
+}
+
+function removeTableRow(sectionIndex, rowIndex) {
+  draftTable(sectionIndex).rows.splice(rowIndex, 1);
+  render();
 }
 
 async function uploadAsset(file, folder) {
@@ -833,10 +1209,35 @@ async function uploadSectionImage(file, sectionIndex) {
   }
 }
 
+async function uploadRowImage(file, sectionIndex, rowIndex) {
+  try {
+    state.uploading = file.name;
+    render();
+    const section = state.draft.report.sections[sectionIndex];
+    const row = section.table.rows[rowIndex];
+    const uploaded = await uploadAsset(file, `tables/${section.section_key}/${row.id}`);
+    if (!uploaded) return;
+    row.media ||= [];
+    row.media.push(uploaded);
+  } catch (error) {
+    state.authMessage = error.message;
+  } finally {
+    state.uploading = "";
+    render();
+  }
+}
+
 function removeMedia(sectionIndex, mediaIndex) {
   const section = state.draft?.report.sections[sectionIndex];
   if (!section?.media) return;
   section.media.splice(mediaIndex, 1);
+  render();
+}
+
+function removeRowMedia(sectionIndex, rowIndex, mediaIndex) {
+  const media = state.draft?.report.sections[sectionIndex]?.table?.rows?.[rowIndex]?.media;
+  if (!media) return;
+  media.splice(mediaIndex, 1);
   render();
 }
 
@@ -850,6 +1251,76 @@ function closeDetail() {
   render();
 }
 
+function toggleTableRow(sectionKey, rowId) {
+  state.expandedTableRows[sectionKey] = state.expandedTableRows[sectionKey] === rowId ? "" : rowId;
+  render();
+}
+
+function openLightbox(items, index = 0) {
+  if (!items.length) return;
+  state.lightbox = {
+    items,
+    index,
+    scale: 1,
+    x: 0,
+    y: 0,
+  };
+  render();
+}
+
+function sectionMediaItems(sectionKey) {
+  return sectionByKey(sectionKey)?.media || [];
+}
+
+function rowMediaItems(sectionKey, rowId) {
+  const section = sectionByKey(sectionKey);
+  return tableRows(section).find((row) => row.id === rowId)?.media || [];
+}
+
+function openSectionLightbox(sectionKey, mediaIndex) {
+  openLightbox(sectionMediaItems(sectionKey), mediaIndex);
+}
+
+function openRowLightbox(sectionKey, rowId, mediaIndex) {
+  openLightbox(rowMediaItems(sectionKey, rowId), mediaIndex);
+}
+
+function closeLightbox() {
+  state.lightbox = null;
+  lightboxDrag = null;
+  render();
+}
+
+function resetLightbox() {
+  if (!state.lightbox) return;
+  state.lightbox.scale = 1;
+  state.lightbox.x = 0;
+  state.lightbox.y = 0;
+  render();
+}
+
+function moveLightbox(step) {
+  if (!state.lightbox) return;
+  const count = state.lightbox.items.length;
+  state.lightbox.index = (state.lightbox.index + step + count) % count;
+  state.lightbox.scale = 1;
+  state.lightbox.x = 0;
+  state.lightbox.y = 0;
+  render();
+}
+
+function applyLightboxTransform() {
+  const image = app.querySelector(".v3-lightbox-image");
+  if (!image || !state.lightbox) return;
+  image.style.transform = `translate(${state.lightbox.x}px, ${state.lightbox.y}px) scale(${state.lightbox.scale})`;
+}
+
+function zoomLightbox(delta) {
+  if (!state.lightbox) return;
+  state.lightbox.scale = clamp(state.lightbox.scale + delta, 0.5, 4);
+  applyLightboxTransform();
+}
+
 app.addEventListener("submit", (event) => {
   const form = event.target.closest("[data-admin-login]");
   if (!form) return;
@@ -861,16 +1332,77 @@ app.addEventListener("click", (event) => {
   const actionElement = event.target.closest("[data-action]");
   const action = actionElement?.dataset.action;
 
-  if (action === "open-editor") openEditor();
-  if (action === "close-editor") closeEditor();
-  if (action === "save-editor") saveEditor();
-  if (action === "logout") logout();
-  if (action === "remove-media") {
-    const button = event.target.closest("[data-action]");
-    removeMedia(Number(button.dataset.sectionIndex), Number(button.dataset.mediaIndex));
+  if (action === "open-editor") {
+    openEditor();
+    return;
   }
-  if (action === "close-detail" && (event.target === actionElement || actionElement.tagName === "BUTTON")) {
-    closeDetail();
+  if (action === "close-editor") {
+    closeEditor();
+    return;
+  }
+  if (action === "save-editor") {
+    saveEditor();
+    return;
+  }
+  if (action === "logout") {
+    logout();
+    return;
+  }
+  if (action === "add-table-column") {
+    addTableColumn(Number(actionElement.dataset.sectionIndex));
+    return;
+  }
+  if (action === "remove-table-column") {
+    removeTableColumn(Number(actionElement.dataset.sectionIndex), Number(actionElement.dataset.columnIndex));
+    return;
+  }
+  if (action === "add-table-row") {
+    addTableRow(Number(actionElement.dataset.sectionIndex));
+    return;
+  }
+  if (action === "remove-table-row") {
+    removeTableRow(Number(actionElement.dataset.sectionIndex), Number(actionElement.dataset.rowIndex));
+    return;
+  }
+  if (action === "remove-media") {
+    removeMedia(Number(actionElement.dataset.sectionIndex), Number(actionElement.dataset.mediaIndex));
+    return;
+  }
+  if (action === "remove-row-media") {
+    removeRowMedia(Number(actionElement.dataset.sectionIndex), Number(actionElement.dataset.rowIndex), Number(actionElement.dataset.rowMediaIndex));
+    return;
+  }
+  if (action === "toggle-table-row") {
+    toggleTableRow(actionElement.dataset.sectionKey, actionElement.dataset.rowId);
+    return;
+  }
+  if (action === "open-section-lightbox") {
+    openSectionLightbox(actionElement.dataset.sectionKey, Number(actionElement.dataset.mediaIndex));
+    return;
+  }
+  if (action === "open-row-lightbox") {
+    openRowLightbox(actionElement.dataset.sectionKey, actionElement.dataset.rowId, Number(actionElement.dataset.mediaIndex));
+    return;
+  }
+  if (action === "prev-lightbox") {
+    moveLightbox(-1);
+    return;
+  }
+  if (action === "next-lightbox") {
+    moveLightbox(1);
+    return;
+  }
+  if (action === "reset-lightbox") {
+    resetLightbox();
+    return;
+  }
+  if (action === "close-lightbox") {
+    if (event.target === actionElement || actionElement.tagName === "BUTTON") closeLightbox();
+    return;
+  }
+  if (action === "close-detail") {
+    if (event.target === actionElement || actionElement.tagName === "BUTTON") closeDetail();
+    return;
   }
 
   const interactive = event.target.closest("a, button, input, textarea, select, label");
@@ -881,6 +1413,10 @@ app.addEventListener("click", (event) => {
 });
 
 app.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.lightbox) {
+    closeLightbox();
+    return;
+  }
   if (event.key === "Escape" && state.activeDetailKey) closeDetail();
   const detailCard = event.target.closest("[data-detail-key]");
   if (detailCard && (event.key === "Enter" || event.key === " ")) {
@@ -901,6 +1437,47 @@ app.addEventListener("change", (event) => {
   if (event.target.matches("[data-upload-section]") && event.target.files?.[0]) {
     uploadSectionImage(event.target.files[0], Number(event.target.dataset.uploadSection));
   }
+  if (event.target.matches("[data-upload-row-image]") && event.target.files?.[0]) {
+    uploadRowImage(event.target.files[0], Number(event.target.dataset.sectionIndex), Number(event.target.dataset.uploadRowImage));
+  }
+});
+
+app.addEventListener(
+  "wheel",
+  (event) => {
+    if (!state.lightbox || !(event.metaKey || event.ctrlKey)) return;
+    event.preventDefault();
+    zoomLightbox(event.deltaY < 0 ? 0.12 : -0.12);
+  },
+  { passive: false },
+);
+
+app.addEventListener("pointerdown", (event) => {
+  if (!state.lightbox || !event.target.closest(".v3-lightbox-stage")) return;
+  lightboxDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    x: state.lightbox.x,
+    y: state.lightbox.y,
+  };
+  event.target.closest(".v3-lightbox-stage").setPointerCapture(event.pointerId);
+});
+
+app.addEventListener("pointermove", (event) => {
+  if (!state.lightbox || !lightboxDrag || lightboxDrag.pointerId !== event.pointerId) return;
+  state.lightbox.x = lightboxDrag.x + event.clientX - lightboxDrag.startX;
+  state.lightbox.y = lightboxDrag.y + event.clientY - lightboxDrag.startY;
+  applyLightboxTransform();
+});
+
+app.addEventListener("pointerup", (event) => {
+  if (lightboxDrag?.pointerId === event.pointerId) lightboxDrag = null;
+});
+
+app.addEventListener("dblclick", (event) => {
+  if (!state.lightbox || !event.target.closest(".v3-lightbox-stage")) return;
+  resetLightbox();
 });
 
 function render() {
