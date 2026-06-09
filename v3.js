@@ -6,6 +6,8 @@ const VERSION = "V3.6";
 const ADMIN_EMAIL = "lyl549439629@gmail.com";
 const REPORT_STATE_ID = "current";
 const ASSET_BUCKET = "report-assets";
+const MAX_UPLOAD_IMAGE_DIMENSION = 1800;
+const TARGET_UPLOAD_IMAGE_BYTES = 1_200_000;
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -1055,7 +1057,7 @@ function renderRowMediaEditor(row, sectionIndex, rowIndex) {
     <div class="v3-editor-group is-nested">
       <label class="v3-file-field">
         <span>Upload row image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-row-image="${rowIndex}" data-section-index="${sectionIndex}" />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-row-image="${rowIndex}" data-section-index="${sectionIndex}" multiple />
       </label>
       <div class="v3-editor-media-list">
         ${
@@ -1085,7 +1087,7 @@ function renderMediaEditor(section, sectionIndex) {
       <h4>Section images</h4>
       <label class="v3-file-field">
         <span>Upload section image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-section="${sectionIndex}" />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-section="${sectionIndex}" multiple />
       </label>
       <div class="v3-editor-media-list">
         ${
@@ -1305,12 +1307,17 @@ function removeTableRow(sectionIndex, rowIndex) {
 
 async function uploadAsset(file, folder) {
   if (!supabase || !file || !state.isAdmin) return null;
-  const extension = file.name.split(".").pop()?.toLowerCase() || "jpg";
-  const safeName = file.name.replace(/[^a-z0-9._-]+/gi, "-").toLowerCase();
-  const path = `${folder}/${Date.now()}-${crypto.randomUUID()}-${safeName}.${extension}`.replace(`.${extension}.${extension}`, `.${extension}`);
+  const prepared = await prepareUploadImage(file);
+  const extension = prepared.extension;
+  const safeBaseName = file.name
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .toLowerCase();
+  const path = `${folder}/${Date.now()}-${crypto.randomUUID()}-${safeBaseName}.${extension}`;
 
-  const { error } = await supabase.storage.from(ASSET_BUCKET).upload(path, file, {
+  const { error } = await supabase.storage.from(ASSET_BUCKET).upload(path, prepared.blob, {
     cacheControl: "3600",
+    contentType: prepared.contentType,
     upsert: false,
   });
   if (error) throw error;
@@ -1319,9 +1326,74 @@ async function uploadAsset(file, folder) {
   return { path, url: data.publicUrl, caption: file.name };
 }
 
+async function prepareUploadImage(file) {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Please upload an image file.");
+  }
+
+  if (file.type === "image/gif") {
+    return {
+      blob: file,
+      contentType: file.type,
+      extension: file.name.split(".").pop()?.toLowerCase() || "gif",
+    };
+  }
+
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, MAX_UPLOAD_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { alpha: false });
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+
+  let quality = 0.82;
+  let blob = await canvasToBlob(canvas, quality);
+  while (blob.size > TARGET_UPLOAD_IMAGE_BYTES && quality > 0.48) {
+    quality -= 0.08;
+    blob = await canvasToBlob(canvas, quality);
+  }
+
+  if (blob.size > TARGET_UPLOAD_IMAGE_BYTES) {
+    const reducedCanvas = document.createElement("canvas");
+    const reducedScale = Math.sqrt(TARGET_UPLOAD_IMAGE_BYTES / blob.size) * 0.92;
+    reducedCanvas.width = Math.max(1, Math.round(width * reducedScale));
+    reducedCanvas.height = Math.max(1, Math.round(height * reducedScale));
+    const reducedContext = reducedCanvas.getContext("2d", { alpha: false });
+    reducedContext.fillStyle = "#ffffff";
+    reducedContext.fillRect(0, 0, reducedCanvas.width, reducedCanvas.height);
+    reducedContext.drawImage(canvas, 0, 0, reducedCanvas.width, reducedCanvas.height);
+    blob = await canvasToBlob(reducedCanvas, 0.72);
+  }
+
+  return {
+    blob,
+    contentType: "image/jpeg",
+    extension: "jpg",
+  };
+}
+
+function canvasToBlob(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Could not compress image."));
+      },
+      "image/jpeg",
+      quality,
+    );
+  });
+}
+
 async function uploadBackground(file) {
   try {
-    state.uploading = file.name;
+    state.uploading = `Compressing ${file.name}`;
     render();
     const uploaded = await uploadAsset(file, "backgrounds");
     if (!uploaded) return;
@@ -1334,15 +1406,16 @@ async function uploadBackground(file) {
   }
 }
 
-async function uploadSectionImage(file, sectionIndex) {
+async function uploadSectionImages(files, sectionIndex) {
   try {
-    state.uploading = file.name;
-    render();
     const section = state.draft.report.sections[sectionIndex];
-    const uploaded = await uploadAsset(file, `sections/${section.section_key}`);
-    if (!uploaded) return;
     section.media ||= [];
-    section.media.push(uploaded);
+    for (const [index, file] of files.entries()) {
+      state.uploading = `Compressing ${file.name} (${index + 1}/${files.length})`;
+      render();
+      const uploaded = await uploadAsset(file, `sections/${section.section_key}`);
+      if (uploaded) section.media.push(uploaded);
+    }
   } catch (error) {
     state.authMessage = error.message;
   } finally {
@@ -1351,16 +1424,17 @@ async function uploadSectionImage(file, sectionIndex) {
   }
 }
 
-async function uploadRowImage(file, sectionIndex, rowIndex) {
+async function uploadRowImages(files, sectionIndex, rowIndex) {
   try {
-    state.uploading = file.name;
-    render();
     const section = state.draft.report.sections[sectionIndex];
     const row = section.table.rows[rowIndex];
-    const uploaded = await uploadAsset(file, `tables/${section.section_key}/${row.id}`);
-    if (!uploaded) return;
     row.media ||= [];
-    row.media.push(uploaded);
+    for (const [index, file] of files.entries()) {
+      state.uploading = `Compressing ${file.name} (${index + 1}/${files.length})`;
+      render();
+      const uploaded = await uploadAsset(file, `tables/${section.section_key}/${row.id}`);
+      if (uploaded) row.media.push(uploaded);
+    }
   } catch (error) {
     state.authMessage = error.message;
   } finally {
@@ -1594,12 +1668,15 @@ app.addEventListener("change", (event) => {
   updateDraftFromInput(event.target);
   if (event.target.matches("[data-upload-background]") && event.target.files?.[0]) {
     uploadBackground(event.target.files[0]);
+    event.target.value = "";
   }
   if (event.target.matches("[data-upload-section]") && event.target.files?.[0]) {
-    uploadSectionImage(event.target.files[0], Number(event.target.dataset.uploadSection));
+    uploadSectionImages([...event.target.files], Number(event.target.dataset.uploadSection));
+    event.target.value = "";
   }
   if (event.target.matches("[data-upload-row-image]") && event.target.files?.[0]) {
-    uploadRowImage(event.target.files[0], Number(event.target.dataset.sectionIndex), Number(event.target.dataset.uploadRowImage));
+    uploadRowImages([...event.target.files], Number(event.target.dataset.sectionIndex), Number(event.target.dataset.uploadRowImage));
+    event.target.value = "";
   }
 });
 
