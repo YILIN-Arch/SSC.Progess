@@ -859,7 +859,7 @@ function renderEditor() {
         </div>
 
         <div class="v3-editor-actions">
-          <button type="button" data-action="save-editor" ${state.saving ? "disabled" : ""}>${state.saving ? "Saving..." : "Save / Publish"}</button>
+          <button type="button" data-action="save-editor" ${state.saving || state.uploading ? "disabled" : ""}>${editorSaveLabel()}</button>
           <button type="button" data-action="close-editor">Cancel</button>
         </div>
 
@@ -874,6 +874,12 @@ function renderEditor() {
       </aside>
     </div>
   `;
+}
+
+function editorSaveLabel() {
+  if (state.saving) return "Saving...";
+  if (state.uploading) return "Uploading...";
+  return "Save / Publish";
 }
 
 function renderField(label, value, attrs) {
@@ -1156,7 +1162,16 @@ function closeEditor() {
 }
 
 async function saveEditor() {
-  if (!supabase || !state.isAdmin || !state.draft) return;
+  if (state.uploading) {
+    state.authMessage = `Still uploading ${state.uploading}. Please wait before publishing.`;
+    render();
+    return;
+  }
+  if (!supabase || !state.isAdmin || !state.draft) {
+    state.authMessage = "Cannot publish. Please confirm Supabase is configured and the admin session is active.";
+    render();
+    return;
+  }
   state.saving = true;
   state.authMessage = "";
   render();
@@ -1627,18 +1642,31 @@ app.addEventListener("dblclick", (event) => {
 });
 
 function render() {
+  const editorScrollTop = app.querySelector(".v3-editor-scroll")?.scrollTop;
+
   if (state.loading) {
     renderLoading();
+    restoreEditorScroll(editorScrollTop);
     return;
   }
 
   if (state.error || !state.report) {
     renderError();
+    restoreEditorScroll(editorScrollTop);
     return;
   }
 
   applyTheme();
   renderReport();
+  restoreEditorScroll(editorScrollTop);
+}
+
+function restoreEditorScroll(scrollTop) {
+  if (scrollTop == null) return;
+  requestAnimationFrame(() => {
+    const editorScroll = app.querySelector(".v3-editor-scroll");
+    if (editorScroll) editorScroll.scrollTop = scrollTop;
+  });
 }
 
 init();
