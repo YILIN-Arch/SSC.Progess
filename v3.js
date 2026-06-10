@@ -8,6 +8,8 @@ const REPORT_STATE_ID = "current";
 const ASSET_BUCKET = "report-assets";
 const MAX_UPLOAD_IMAGE_DIMENSION = 1800;
 const TARGET_UPLOAD_IMAGE_BYTES = 1_200_000;
+const IMAGE_COMPRESSION_TIMEOUT_MS = 30_000;
+const STORAGE_UPLOAD_TIMEOUT_MS = 60_000;
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -913,7 +915,7 @@ function renderThemeEditor(theme) {
       </label>
       <label class="v3-file-field">
         <span>Upload background image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-background />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-background ${state.uploading ? "disabled" : ""} />
       </label>
     </section>
   `;
@@ -1057,7 +1059,7 @@ function renderRowMediaEditor(row, sectionIndex, rowIndex) {
     <div class="v3-editor-group is-nested">
       <label class="v3-file-field">
         <span>Upload row image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-row-image="${rowIndex}" data-section-index="${sectionIndex}" multiple />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-row-image="${rowIndex}" data-section-index="${sectionIndex}" multiple ${state.uploading ? "disabled" : ""} />
       </label>
       <div class="v3-editor-media-list">
         ${
@@ -1087,7 +1089,7 @@ function renderMediaEditor(section, sectionIndex) {
       <h4>Section images</h4>
       <label class="v3-file-field">
         <span>Upload section image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-section="${sectionIndex}" multiple />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-section="${sectionIndex}" multiple ${state.uploading ? "disabled" : ""} />
       </label>
       <div class="v3-editor-media-list">
         ${
@@ -1307,7 +1309,11 @@ function removeTableRow(sectionIndex, rowIndex) {
 
 async function uploadAsset(file, folder) {
   if (!supabase || !file || !state.isAdmin) return null;
-  const prepared = await prepareUploadImage(file);
+  const prepared = await withTimeout(
+    prepareUploadImage(file),
+    IMAGE_COMPRESSION_TIMEOUT_MS,
+    `Could not process ${file.name}. Please try a smaller JPG.`,
+  );
   const extension = prepared.extension;
   const safeBaseName = file.name
     .replace(/\.[^.]+$/, "")
@@ -1315,15 +1321,35 @@ async function uploadAsset(file, folder) {
     .toLowerCase();
   const path = `${folder}/${Date.now()}-${crypto.randomUUID()}-${safeBaseName}.${extension}`;
 
-  const { error } = await supabase.storage.from(ASSET_BUCKET).upload(path, prepared.blob, {
-    cacheControl: "3600",
-    contentType: prepared.contentType,
-    upsert: false,
-  });
+  const { error } = await withTimeout(
+    supabase.storage.from(ASSET_BUCKET).upload(path, prepared.blob, {
+      cacheControl: "3600",
+      contentType: prepared.contentType,
+      upsert: false,
+    }),
+    STORAGE_UPLOAD_TIMEOUT_MS,
+    `Upload timed out for ${file.name}. Please try again.`,
+  );
   if (error) throw error;
 
   const { data } = supabase.storage.from(ASSET_BUCKET).getPublicUrl(path);
   return { path, url: data.publicUrl, caption: file.name };
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 async function prepareUploadImage(file) {
@@ -1339,43 +1365,59 @@ async function prepareUploadImage(file) {
     };
   }
 
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, MAX_UPLOAD_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height));
-  const width = Math.max(1, Math.round(bitmap.width * scale));
-  const height = Math.max(1, Math.round(bitmap.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { alpha: false });
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, width, height);
-  context.drawImage(bitmap, 0, 0, width, height);
-  bitmap.close?.();
+  const loaded = await loadImageElement(file);
+  try {
+    const scale = Math.min(1, MAX_UPLOAD_IMAGE_DIMENSION / Math.max(loaded.image.naturalWidth, loaded.image.naturalHeight));
+    const width = Math.max(1, Math.round(loaded.image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(loaded.image.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { alpha: false });
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(loaded.image, 0, 0, width, height);
 
-  let quality = 0.82;
-  let blob = await canvasToBlob(canvas, quality);
-  while (blob.size > TARGET_UPLOAD_IMAGE_BYTES && quality > 0.48) {
-    quality -= 0.08;
-    blob = await canvasToBlob(canvas, quality);
+    let quality = 0.82;
+    let blob = await canvasToBlob(canvas, quality);
+    while (blob.size > TARGET_UPLOAD_IMAGE_BYTES && quality > 0.48) {
+      quality -= 0.08;
+      blob = await canvasToBlob(canvas, quality);
+    }
+
+    if (blob.size > TARGET_UPLOAD_IMAGE_BYTES) {
+      const reducedCanvas = document.createElement("canvas");
+      const reducedScale = Math.sqrt(TARGET_UPLOAD_IMAGE_BYTES / blob.size) * 0.92;
+      reducedCanvas.width = Math.max(1, Math.round(width * reducedScale));
+      reducedCanvas.height = Math.max(1, Math.round(height * reducedScale));
+      const reducedContext = reducedCanvas.getContext("2d", { alpha: false });
+      reducedContext.fillStyle = "#ffffff";
+      reducedContext.fillRect(0, 0, reducedCanvas.width, reducedCanvas.height);
+      reducedContext.drawImage(canvas, 0, 0, reducedCanvas.width, reducedCanvas.height);
+      blob = await canvasToBlob(reducedCanvas, 0.72);
+    }
+
+    return {
+      blob,
+      contentType: "image/jpeg",
+      extension: "jpg",
+    };
+  } finally {
+    loaded.revoke();
   }
+}
 
-  if (blob.size > TARGET_UPLOAD_IMAGE_BYTES) {
-    const reducedCanvas = document.createElement("canvas");
-    const reducedScale = Math.sqrt(TARGET_UPLOAD_IMAGE_BYTES / blob.size) * 0.92;
-    reducedCanvas.width = Math.max(1, Math.round(width * reducedScale));
-    reducedCanvas.height = Math.max(1, Math.round(height * reducedScale));
-    const reducedContext = reducedCanvas.getContext("2d", { alpha: false });
-    reducedContext.fillStyle = "#ffffff";
-    reducedContext.fillRect(0, 0, reducedCanvas.width, reducedCanvas.height);
-    reducedContext.drawImage(canvas, 0, 0, reducedCanvas.width, reducedCanvas.height);
-    blob = await canvasToBlob(reducedCanvas, 0.72);
-  }
-
-  return {
-    blob,
-    contentType: "image/jpeg",
-    extension: "jpg",
-  };
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => resolve({ image, revoke: () => URL.revokeObjectURL(url) });
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(`Could not read ${file.name}. Please use JPG, PNG, or WebP.`));
+    };
+    image.src = url;
+  });
 }
 
 function canvasToBlob(canvas, quality) {
@@ -1393,6 +1435,7 @@ function canvasToBlob(canvas, quality) {
 
 async function uploadBackground(file) {
   try {
+    state.authMessage = "";
     state.uploading = `Compressing ${file.name}`;
     render();
     const uploaded = await uploadAsset(file, "backgrounds");
@@ -1408,6 +1451,7 @@ async function uploadBackground(file) {
 
 async function uploadSectionImages(files, sectionIndex) {
   try {
+    state.authMessage = "";
     const section = state.draft.report.sections[sectionIndex];
     section.media ||= [];
     for (const [index, file] of files.entries()) {
@@ -1426,6 +1470,7 @@ async function uploadSectionImages(files, sectionIndex) {
 
 async function uploadRowImages(files, sectionIndex, rowIndex) {
   try {
+    state.authMessage = "";
     const section = state.draft.report.sections[sectionIndex];
     const row = section.table.rows[rowIndex];
     row.media ||= [];
