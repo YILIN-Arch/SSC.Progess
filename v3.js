@@ -304,6 +304,13 @@ async function init() {
 }
 
 async function initSupabase() {
+  const authError = authErrorFromUrl();
+  if (authError) {
+    state.authMessage = authError;
+    await supabase.auth.signOut();
+    clearAuthErrorFromUrl();
+  }
+
   const { data } = await supabase.auth.getSession();
   state.session = data.session;
   await refreshAdmin();
@@ -315,16 +322,41 @@ async function initSupabase() {
   });
 }
 
+function authErrorFromUrl() {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const search = new URLSearchParams(window.location.search);
+  const description = hash.get("error_description") || search.get("error_description");
+  if (!description) return "";
+  return description.replaceAll("+", " ");
+}
+
+function clearAuthErrorFromUrl() {
+  if (!window.location.hash.includes("error")) return;
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+}
+
 async function refreshAdmin() {
   state.isAdmin = false;
-  if (!supabase || !state.session) return;
+  if (!supabase || !state.session) {
+    closeEditorForAuthLoss();
+    return;
+  }
 
   const { data, error } = await supabase.rpc("is_report_admin");
   if (error) {
     state.authMessage = error.message;
+    closeEditorForAuthLoss();
     return;
   }
   state.isAdmin = Boolean(data);
+  if (!state.isAdmin) closeEditorForAuthLoss();
+}
+
+function closeEditorForAuthLoss() {
+  state.editorOpen = false;
+  state.draft = null;
+  state.saving = false;
+  state.uploading = "";
 }
 
 async function loadPublishedState() {
@@ -915,7 +947,7 @@ function renderThemeEditor(theme) {
       </label>
       <label class="v3-file-field">
         <span>Upload background image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-background ${state.uploading ? "disabled" : ""} />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-background ${state.uploading || !state.isAdmin ? "disabled" : ""} />
       </label>
     </section>
   `;
@@ -1059,7 +1091,7 @@ function renderRowMediaEditor(row, sectionIndex, rowIndex) {
     <div class="v3-editor-group is-nested">
       <label class="v3-file-field">
         <span>Upload row image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-row-image="${rowIndex}" data-section-index="${sectionIndex}" multiple ${state.uploading ? "disabled" : ""} />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-row-image="${rowIndex}" data-section-index="${sectionIndex}" multiple ${state.uploading || !state.isAdmin ? "disabled" : ""} />
       </label>
       <div class="v3-editor-media-list">
         ${
@@ -1089,7 +1121,7 @@ function renderMediaEditor(section, sectionIndex) {
       <h4>Section images</h4>
       <label class="v3-file-field">
         <span>Upload section image</span>
-        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-section="${sectionIndex}" multiple ${state.uploading ? "disabled" : ""} />
+        <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-upload-section="${sectionIndex}" multiple ${state.uploading || !state.isAdmin ? "disabled" : ""} />
       </label>
       <div class="v3-editor-media-list">
         ${
@@ -1141,6 +1173,12 @@ async function logout() {
 }
 
 function openEditor() {
+  if (!state.isAdmin) {
+    state.authMessage = "Please sign in again with the admin email before editing.";
+    render();
+    return;
+  }
+
   if (state.selectedHistoryKey !== "current") {
     state.report = clone(state.currentReport || state.report);
     state.theme = mergeTheme(state.currentTheme);
@@ -1308,7 +1346,9 @@ function removeTableRow(sectionIndex, rowIndex) {
 }
 
 async function uploadAsset(file, folder) {
-  if (!supabase || !file || !state.isAdmin) return null;
+  if (!supabase || !file || !state.isAdmin) {
+    throw new Error("Please sign in again with the admin email before uploading.");
+  }
   const prepared = await withTimeout(
     prepareUploadImage(file),
     IMAGE_COMPRESSION_TIMEOUT_MS,
@@ -1435,6 +1475,7 @@ function canvasToBlob(canvas, quality) {
 
 async function uploadBackground(file) {
   try {
+    if (!state.isAdmin) throw new Error("Please sign in again with the admin email before uploading.");
     state.authMessage = "";
     state.uploading = `Compressing ${file.name}`;
     render();
@@ -1451,6 +1492,7 @@ async function uploadBackground(file) {
 
 async function uploadSectionImages(files, sectionIndex) {
   try {
+    if (!state.isAdmin) throw new Error("Please sign in again with the admin email before uploading.");
     state.authMessage = "";
     const section = state.draft.report.sections[sectionIndex];
     section.media ||= [];
@@ -1470,6 +1512,7 @@ async function uploadSectionImages(files, sectionIndex) {
 
 async function uploadRowImages(files, sectionIndex, rowIndex) {
   try {
+    if (!state.isAdmin) throw new Error("Please sign in again with the admin email before uploading.");
     state.authMessage = "";
     const section = state.draft.report.sections[sectionIndex];
     const row = section.table.rows[rowIndex];
