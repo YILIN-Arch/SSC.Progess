@@ -14,7 +14,16 @@ const STORAGE_UPLOAD_TIMEOUT_MS = 60_000;
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 const hasSupabaseConfig = Boolean(supabaseUrl && supabaseKey);
-const supabase = hasSupabaseConfig ? createClient(supabaseUrl, supabaseKey) : null;
+const supabase = hasSupabaseConfig
+  ? createClient(supabaseUrl, supabaseKey, {
+      auth: {
+        autoRefreshToken: true,
+        persistSession: true,
+        detectSessionInUrl: true,
+        storageKey: "morning-report-admin-session",
+      },
+    })
+  : null;
 
 const defaultTheme = {
   background: {
@@ -308,16 +317,18 @@ async function initSupabase() {
   if (authError) {
     state.authMessage = authError;
     await supabase.auth.signOut();
-    clearAuthErrorFromUrl();
+    cleanAdminUrl();
   }
 
   const { data } = await supabase.auth.getSession();
   state.session = data.session;
   await refreshAdmin();
+  if (state.session && state.isAdminMode) cleanAdminUrl();
 
-  supabase.auth.onAuthStateChange(async (_event, session) => {
+  supabase.auth.onAuthStateChange(async (event, session) => {
     state.session = session;
     await refreshAdmin();
+    if (session && state.isAdminMode && (event === "SIGNED_IN" || event === "TOKEN_REFRESHED")) cleanAdminUrl();
     render();
   });
 }
@@ -330,9 +341,12 @@ function authErrorFromUrl() {
   return description.replaceAll("+", " ");
 }
 
-function clearAuthErrorFromUrl() {
-  if (!window.location.hash.includes("error")) return;
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+function cleanAdminUrl() {
+  if (!state.isAdminMode) return;
+  const cleanUrl = `${window.location.pathname}?admin=1`;
+  if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== cleanUrl) {
+    window.history.replaceState(null, "", cleanUrl);
+  }
 }
 
 async function refreshAdmin() {
