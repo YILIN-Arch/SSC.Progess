@@ -349,21 +349,39 @@ function cleanAdminUrl() {
   }
 }
 
-async function refreshAdmin() {
+async function refreshAdmin({ closeOnFailure = true } = {}) {
   state.isAdmin = false;
   if (!supabase || !state.session) {
-    closeEditorForAuthLoss();
+    if (closeOnFailure) closeEditorForAuthLoss();
     return;
   }
 
   const { data, error } = await supabase.rpc("is_report_admin");
   if (error) {
     state.authMessage = error.message;
-    closeEditorForAuthLoss();
+    if (closeOnFailure) closeEditorForAuthLoss();
     return;
   }
   state.isAdmin = Boolean(data);
-  if (!state.isAdmin) closeEditorForAuthLoss();
+  if (!state.isAdmin && closeOnFailure) closeEditorForAuthLoss();
+}
+
+async function ensureAdminSession({ closeOnFailure = false } = {}) {
+  if (!supabase) {
+    state.authMessage = "Cannot publish. Supabase environment variables are not configured.";
+    return false;
+  }
+  const { data, error } = await supabase.auth.getSession();
+  if (error) {
+    state.authMessage = error.message;
+    return false;
+  }
+  state.session = data.session;
+  await refreshAdmin({ closeOnFailure });
+  if (!state.isAdmin) {
+    state.authMessage = "Cannot publish. Please open ?admin=1 and sign in again with the latest Supabase email link.";
+  }
+  return state.isAdmin;
 }
 
 function closeEditorForAuthLoss() {
@@ -1186,8 +1204,8 @@ async function logout() {
   render();
 }
 
-function openEditor() {
-  if (!state.isAdmin) {
+async function openEditor() {
+  if (!state.isAdmin && !(await ensureAdminSession({ closeOnFailure: true }))) {
     state.authMessage = "Please sign in again with the admin email before editing.";
     render();
     return;
@@ -1223,8 +1241,12 @@ async function saveEditor() {
     render();
     return;
   }
-  if (!supabase || !state.isAdmin || !state.draft) {
-    state.authMessage = "Cannot publish. Please confirm Supabase is configured and the admin session is active.";
+  if (!state.draft) {
+    state.authMessage = "Cannot publish. Please reopen the editor and try again.";
+    render();
+    return;
+  }
+  if (!(await ensureAdminSession())) {
     render();
     return;
   }
@@ -1360,7 +1382,7 @@ function removeTableRow(sectionIndex, rowIndex) {
 }
 
 async function uploadAsset(file, folder) {
-  if (!supabase || !file || !state.isAdmin) {
+  if (!file || !(await ensureAdminSession())) {
     throw new Error("Please sign in again with the admin email before uploading.");
   }
   const prepared = await withTimeout(
@@ -1489,7 +1511,7 @@ function canvasToBlob(canvas, quality) {
 
 async function uploadBackground(file) {
   try {
-    if (!state.isAdmin) throw new Error("Please sign in again with the admin email before uploading.");
+    if (!(await ensureAdminSession())) throw new Error("Please sign in again with the admin email before uploading.");
     state.authMessage = "";
     state.uploading = `Compressing ${file.name}`;
     render();
@@ -1506,7 +1528,7 @@ async function uploadBackground(file) {
 
 async function uploadSectionImages(files, sectionIndex) {
   try {
-    if (!state.isAdmin) throw new Error("Please sign in again with the admin email before uploading.");
+    if (!(await ensureAdminSession())) throw new Error("Please sign in again with the admin email before uploading.");
     state.authMessage = "";
     const section = state.draft.report.sections[sectionIndex];
     section.media ||= [];
@@ -1526,7 +1548,7 @@ async function uploadSectionImages(files, sectionIndex) {
 
 async function uploadRowImages(files, sectionIndex, rowIndex) {
   try {
-    if (!state.isAdmin) throw new Error("Please sign in again with the admin email before uploading.");
+    if (!(await ensureAdminSession())) throw new Error("Please sign in again with the admin email before uploading.");
     state.authMessage = "";
     const section = state.draft.report.sections[sectionIndex];
     const row = section.table.rows[rowIndex];
