@@ -2,12 +2,12 @@ import { createClient } from "@supabase/supabase-js";
 
 const app = document.querySelector("#v3-app");
 
-const VERSION = "V3.6";
+const VERSION = "V3.7";
 const ADMIN_EMAIL = "lyl549439629@gmail.com";
 const REPORT_STATE_ID = "current";
 const ASSET_BUCKET = "report-assets";
-const MAX_UPLOAD_IMAGE_DIMENSION = 1800;
-const TARGET_UPLOAD_IMAGE_BYTES = 1_200_000;
+const MAX_UPLOAD_IMAGE_DIMENSION = 1400;
+const TARGET_UPLOAD_IMAGE_BYTES = 500_000;
 const IMAGE_COMPRESSION_TIMEOUT_MS = 30_000;
 const STORAGE_UPLOAD_TIMEOUT_MS = 60_000;
 
@@ -1272,21 +1272,7 @@ async function saveEditor() {
     return;
   }
 
-  const dateKey = normalizeReportDateKey(report.report_header?.date);
-  if (dateKey) {
-    const { error: historyError } = await supabase.from("report_page_history").upsert({
-      date_key: dateKey,
-      report_date: report.report_header?.date || dateKey,
-      report,
-      theme: state.draft.theme,
-      updated_by: userData.user?.id,
-      updated_at: updatedAt,
-    });
-
-    if (historyError) {
-      state.authMessage = `Published current. History unavailable: ${historyError.message}`;
-    }
-  }
+  // ponytail: skip history writes for the meeting build; restore when publish stability matters less.
 
   state.report = clone(report);
   state.theme = mergeTheme(state.draft.theme);
